@@ -1,6 +1,9 @@
 #!/usr/bin/python
-""" This whole file is hacks
-All of it"""
+"""
+This whole file is hacks
+All of it
+None of it is not hacks
+"""
 
 from itertools import repeat
 import os
@@ -13,9 +16,12 @@ import sys
 
 import git
 
-
 WANT_HEADER = 0
 WANT_LINE = 1
+WANT_AUTHOR = 2
+WANT_AUTHOR_MAIL = 3
+WANT_TIME = 4
+WANT_TZ = 5
 
 def hunk_diff(lines):
 	script = StringIO()
@@ -39,6 +45,20 @@ def file_diff(blame_output):
 		blame_line = blame_line[:-1]
 		if mode == WANT_HEADER:
 			sha, first_line, current_lineno = blame_line.split()[:3]
+			mode = WANT_AUTHOR
+		elif mode == WANT_AUTHOR:
+			author = blame_line.split(' ', 1)[1]
+			mode = WANT_AUTHOR_MAIL
+		elif mode == WANT_AUTHOR_MAIL:
+			author_email = blame_line.split(' ', 1)[1].strip('<>')
+			mode = WANT_TIME
+		elif mode == WANT_TIME:
+			time = blame_line.split(' ', 1)[1]
+			mode = WANT_TZ
+		elif mode == WANT_TZ:
+			tz = blame_line.split(' ', 1)[1]
+			time += ' '
+			time += tz
 			mode = WANT_LINE
 		elif mode == WANT_LINE:
 			if blame_line.startswith('\t'):
@@ -54,7 +74,7 @@ def file_diff(blame_output):
 	print >> initial, ''.join(repeat('\n', line_count)),
 	print >> initial, '.'
 
-	hunk_diffs = [(sha, hunk_diff(lines)) for (sha, lines) in line_table.iteritems()]
+	hunk_diffs = [(sha, hunk_diff(lines), author, author_email, time) for (sha, lines) in line_table.iteritems()]
 	return initial, hunk_diffs
 
 new_repo_loc = sys.argv[1]
@@ -68,9 +88,13 @@ old_master = old_repo.heads.master
 
 grep = Popen(['git','grep','-I','-l','^'], stdout=PIPE)
 
+processed_files = set()
 for i in grep.stdout.readlines():
+	os.environ["GIT_AUTHOR_NAME"] = sys.argv[2]
+	os.environ["GIT_AUTHOR_EMAIL"] = sys.argv[3]
+
 	filename = i.rstrip('\n')
-	blame = Popen(['git', 'blame', '-p', '--', filename], stdout=PIPE).stdout
+	blame = Popen(['git', 'blame', '--line-porcelain', '--', filename], stdout=PIPE).stdout
 	initial, hunk_diffs = file_diff(blame)
 
 	# where will the new file go
@@ -80,7 +104,7 @@ for i in grep.stdout.readlines():
 		os.makedirs(new_file_dir)
 
 	#create it, blank
-	ed_header = 'f %s\n' % new_file
+	ed_header = 'e %s\n' % new_file
 	ed_footer = 'wq\n'
 	ed = Popen(['ed', '-s'], stdin=PIPE)
 	ed.communicate(input=(ed_header + initial.getvalue() + ed_footer))
@@ -89,14 +113,23 @@ for i in grep.stdout.readlines():
 	new_repo.index.add([filename])
 	new_repo.index.commit('Blank file %s' % filename)
 
-	for (sha, diff) in hunk_diffs:
+	for (sha, diff, author, author_email, author_date) in hunk_diffs:
 		ed = Popen(['ed', '-s'], stdin=PIPE)
-		ed.communicate(input=(ed_header + diff.getvalue() + ed_footer))
+		script = ed_header + diff.getvalue() + ed_footer
+		ed.communicate(input=script)
 		ed.wait()
 		new_repo.index.add([filename])
-		os.environ["GIT_AUTHOR_EMAIL"] = "obama@whitehouse.gov"
-		os.environ["GIT_AUTHOR_NAME"] = "Barack Obama"
+		os.environ["GIT_AUTHOR_NAME"] = author
+		os.environ["GIT_AUTHOR_EMAIL"] = author_email
+		os.environ["GIT_AUTHOR_DATE"] = author_date
 		new_repo.index.commit('From commit %s' % sha)
 
-	del os.environ["GIT_AUTHOR_EMAIL"]
-	del os.environ["GIT_AUTHOR_NAME"]
+	processed_files.add(filename)
+
+for i in old_repo.tree().traverse():
+	if i.type != 'blob':
+		continue
+
+	filename = i.path
+	if filename not in processed_files:
+		print filename
