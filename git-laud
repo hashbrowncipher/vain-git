@@ -1,0 +1,102 @@
+#!/usr/bin/python
+""" This whole file is hacks
+All of it"""
+
+from itertools import repeat
+import os
+import os.path
+from subprocess import check_call
+from subprocess import PIPE
+from subprocess import Popen
+from StringIO import StringIO
+import sys
+
+import git
+
+
+WANT_HEADER = 0
+WANT_LINE = 1
+
+def hunk_diff(lines):
+	script = StringIO()
+	for (lineno, content) in lines:
+			print >> script, '%sc' % lineno
+			if content == '.':
+				print >> script, '..'
+				print >> script, 's/.//'
+			else:
+				print >> script, content
+			print >> script, '.'
+	return script
+	
+def file_diff(blame_output):
+	mode = WANT_HEADER
+	line_table = dict()
+
+	line_count = 0
+
+	for blame_line in blame_output.readlines():
+		blame_line = blame_line[:-1]
+		if mode == WANT_HEADER:
+			sha, first_line, current_lineno = blame_line.split()[:3]
+			mode = WANT_LINE
+		elif mode == WANT_LINE:
+			if blame_line.startswith('\t'):
+				if sha not in line_table:
+					line_table[sha] = list()
+				line_table[sha].append((current_lineno, blame_line[1:]))
+				line_count += 1
+				mode = WANT_HEADER
+
+	initial = StringIO()
+
+	print >> initial, '0a'
+	print >> initial, ''.join(repeat('\n', line_count)),
+	print >> initial, '.'
+
+	hunk_diffs = [(sha, hunk_diff(lines)) for (sha, lines) in line_table.iteritems()]
+	return initial, hunk_diffs
+
+new_repo_loc = sys.argv[1]
+
+old_repo = git.Repo(os.getcwd())
+new_repo = git.Repo.init(new_repo_loc)
+
+old_tree = old_repo.tree()
+old_master = old_repo.heads.master
+
+
+grep = Popen(['git','grep','-I','-l','^'], stdout=PIPE)
+
+for i in grep.stdout.readlines():
+	filename = i.rstrip('\n')
+	blame = Popen(['git', 'blame', '-p', '--', filename], stdout=PIPE).stdout
+	initial, hunk_diffs = file_diff(blame)
+
+	# where will the new file go
+	new_file = os.path.join(new_repo_loc, filename)
+	new_file_dir = os.path.dirname(new_file)
+	if not os.path.exists(new_file_dir):
+		os.makedirs(new_file_dir)
+
+	#create it, blank
+	ed_header = 'f %s\n' % new_file
+	ed_footer = 'wq\n'
+	ed = Popen(['ed', '-s'], stdin=PIPE)
+	ed.communicate(input=(ed_header + initial.getvalue() + ed_footer))
+	ed.wait()
+
+	new_repo.index.add([filename])
+	new_repo.index.commit('Blank file %s' % filename)
+
+	for (sha, diff) in hunk_diffs:
+		ed = Popen(['ed', '-s'], stdin=PIPE)
+		ed.communicate(input=(ed_header + diff.getvalue() + ed_footer))
+		ed.wait()
+		new_repo.index.add([filename])
+		os.environ["GIT_AUTHOR_EMAIL"] = "obama@whitehouse.gov"
+		os.environ["GIT_AUTHOR_NAME"] = "Barack Obama"
+		new_repo.index.commit('From commit %s' % sha)
+
+	del os.environ["GIT_AUTHOR_EMAIL"]
+	del os.environ["GIT_AUTHOR_NAME"]
